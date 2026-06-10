@@ -10,7 +10,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 # ---------------- CONFIG (from environment variables) ----------------
 API_KEY          = os.environ['JOTFORM_API_KEY']
 FORM_ID          = os.environ['JOTFORM_FORM_ID']
-SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', 'Copy of Travel desk version 2.0')
+SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', 'Travel desk version 2.0')
 WORKSHEET_NAME   = os.environ.get('WORKSHEET_NAME_APPROVAL', 'Approval status')
 START_DATE       = os.environ.get('START_DATE', '2023-08-01 00:00:00')
 BASE_URL         = 'https://pw.jotform.com/API'
