@@ -32,17 +32,18 @@ def append_with_retry(sheet, batch, retries=3):
 
 
 # ---------------- CONFIG (from environment variables) ----------------
-API_KEY          = os.environ['API_KEY']
-FORM_ID          = os.environ['FORM_ID']
-SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', 'Travel desk version 2.0')
+API_KEY          = os.environ['JOTFORM_API_KEY']
+FORM_ID          = os.environ['JOTFORM_FORM_ID']
+SPREADSHEET_ID   = os.environ['SPREADSHEET_ID']          # Google Sheet ID from URL
 WORKSHEET_NAME   = os.environ.get('WORKSHEET_NAME_TDR', 'TDR Updated')
+CREDENTIALS      = os.environ.get('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 
 TOTAL_LIMIT         = int(os.environ.get('TOTAL_LIMIT', 8000))
 PAGE_SIZE           = int(os.environ.get('PAGE_SIZE', 200))
 SLEEP_BETWEEN_CALLS = int(os.environ.get('SLEEP_BETWEEN_CALLS', 2))
 WRITE_BATCH_SIZE    = int(os.environ.get('WRITE_BATCH_SIZE', 500))
 
-# ---------------- JOTFORM (custom enterprise server) ----------------
+# ---------------- JOTFORM ----------------
 jotform = JotformAPIClient(API_KEY)
 jotform.set_baseurl('https://pw.jotform.com/API/')
 
@@ -51,19 +52,25 @@ scope = [
     'https://spreadsheets.google.com/feeds',
     'https://www.googleapis.com/auth/drive'
 ]
-
-# Credentials are written from the GH secret (base64-encoded JSON or raw JSON)
-CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS_JSON', 'credentials.json')
 creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS, scope)
 client = gspread.authorize(creds)
-sheet  = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+
+# open_by_key avoids SpreadsheetNotFound issues with shared/named sheets
+try:
+    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    sheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    print(f"✅ Opened sheet: '{spreadsheet.title}' → worksheet: '{WORKSHEET_NAME}'")
+except gspread.exceptions.SpreadsheetNotFound:
+    raise Exception(f"❌ Spreadsheet not found for ID: {SPREADSHEET_ID}. Check SPREADSHEET_ID secret and service account sharing.")
+except gspread.exceptions.WorksheetNotFound:
+    raise Exception(f"❌ Worksheet '{WORKSHEET_NAME}' not found. Check WORKSHEET_NAME_TDR secret.")
 
 # ---------------- PRESERVE HEADERS ----------------
 existing_headers = sheet.row_values(1)
 if not existing_headers:
-    raise Exception("Header row missing in destination sheet")
+    raise Exception("❌ Header row missing in destination sheet")
 
-# ---- SAFE CLEAR: values only, no row deletion ----
+# ---------------- SAFE CLEAR: values only, no row deletion ----------------
 row_count = sheet.row_count
 col_count = sheet.col_count
 
@@ -76,7 +83,7 @@ print("🧹 Old data cleared (values only), header preserved")
 # ---------------- DISCOVER JOTFORM FIELDS ----------------
 first_batch = jotform.get_form_submissions(FORM_ID, limit=1, offset=0)
 if not first_batch:
-    raise Exception("No submissions found")
+    raise Exception("❌ No submissions found for this form")
 
 first_sub    = first_batch[0]
 answers_meta = first_sub.get('answers', {})
@@ -98,13 +105,13 @@ if new_headers:
     existing_headers = updated_headers
     print(f"➕ Added new columns: {new_headers}")
 
-# ---------------- FETCH & WRITE (streaming batches) ----------------
+# ---------------- FETCH & WRITE ----------------
 offset        = 0
 fetched       = 0
 rows_buffer   = []
 total_written = 0
 
-print("🚀 Fetching latest submissions...")
+print("🚀 Fetching submissions from JotForm...")
 
 while fetched < TOTAL_LIMIT:
     try:
@@ -115,11 +122,12 @@ while fetched < TOTAL_LIMIT:
         )
 
         if not submissions:
+            print("✔ No more submissions found.")
             break
 
         for sub in submissions:
             row_data = {
-                'Submission ID':    sub.get('id'),
+                'Submission ID':    sub.get('id', ''),
                 'Submission Date':  sub.get('created_at', ''),
                 'Last Update Date': sub.get('updated_at', ''),
                 'Approval Status':  (
@@ -147,7 +155,6 @@ while fetched < TOTAL_LIMIT:
             if fetched >= TOTAL_LIMIT:
                 break
 
-        # Flush buffer to Sheets whenever it reaches WRITE_BATCH_SIZE
         if len(rows_buffer) >= WRITE_BATCH_SIZE:
             append_with_retry(sheet, rows_buffer)
             total_written += len(rows_buffer)
@@ -156,15 +163,15 @@ while fetched < TOTAL_LIMIT:
             time.sleep(2)
 
         offset += PAGE_SIZE
-        print(f"✔ Pulled {fetched} submissions")
+        print(f"✔ Pulled {fetched} submissions so far...")
         time.sleep(SLEEP_BETWEEN_CALLS)
 
     except IncompleteRead:
-        print("⚠️  IncompleteRead detected, retrying...")
+        print("⚠️  IncompleteRead detected, retrying after 5s...")
         time.sleep(5)
         continue
 
-# ---------------- FLUSH REMAINING ROWS ----------------
+# ---------------- FLUSH REMAINING ----------------
 if rows_buffer:
     append_with_retry(sheet, rows_buffer)
     total_written += len(rows_buffer)
