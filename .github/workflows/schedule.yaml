@@ -24,8 +24,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      JOTFORM_API_KEY:         ${{ secrets.JOTFORM_API_KEY }}
-      JOTFORM_FORM_ID:         ${{ secrets.JOTFORM_FORM_ID }}
+      JOTFORM_API_KEY:         ${{ secrets.API_KEY }}
+      JOTFORM_FORM_ID:         ${{ secrets.FORM_ID }}
       SPREADSHEET_NAME:        ${{ secrets.SPREADSHEET_NAME }}
       WORKSHEET_NAME_TDR:      ${{ secrets.WORKSHEET_NAME_TDR }}
       TOTAL_LIMIT:             ${{ github.event.inputs.total_limit || '8000' }}
@@ -64,8 +64,8 @@ jobs:
     needs: sync-tdr
 
     env:
-      JOTFORM_API_KEY:          ${{ secrets.JOTFORM_API_KEY }}
-      JOTFORM_FORM_ID:          ${{ secrets.JOTFORM_FORM_ID }}
+      JOTFORM_API_KEY:          ${{ secrets.API_KEY }}
+      JOTFORM_FORM_ID:          ${{ secrets.FORM_ID }}
       SPREADSHEET_NAME:         ${{ secrets.SPREADSHEET_NAME }}
       WORKSHEET_NAME_APPROVAL:  ${{ secrets.WORKSHEET_NAME_APPROVAL }}
       START_DATE:               ${{ github.event.inputs.start_date || '2023-08-01 00:00:00' }}
