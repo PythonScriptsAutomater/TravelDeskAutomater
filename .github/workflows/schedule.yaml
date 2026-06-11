@@ -1,8 +1,6 @@
 name: JotForm → Google Sheets Sync
 
 on:
-  schedule:
-    - cron: '30 4 * * *'    # 4:30 AM UTC = 10:00 AM IST
 
   workflow_dispatch:
     inputs:
