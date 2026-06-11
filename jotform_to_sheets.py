@@ -34,7 +34,7 @@ def append_with_retry(sheet, batch, retries=3):
 # ---------------- CONFIG (from environment variables) ----------------
 API_KEY          = os.environ['JOTFORM_API_KEY']
 FORM_ID          = os.environ['JOTFORM_FORM_ID']
-SPREADSHEET_ID   = os.environ['SPREADSHEET_ID']          # Google Sheet ID from URL
+SPREADSHEET_NAME   = os.environ['SPREADSHEET_NAME']          # Google Sheet ID from URL
 WORKSHEET_NAME   = os.environ.get('WORKSHEET_NAME_TDR', 'TDR Updated')
 CREDENTIALS      = os.environ.get('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 
