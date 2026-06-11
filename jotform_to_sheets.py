@@ -21,7 +21,7 @@ PAGE_SIZE           = int(os.environ.get('PAGE_SIZE', 200))
 SLEEP_BETWEEN_CALLS = int(os.environ.get('SLEEP_BETWEEN_CALLS', 2))
 WRITE_BATCH_SIZE    = int(os.environ.get('WRITE_BATCH_SIZE', 500))
 THREAD_WORKERS      = int(os.environ.get('THREAD_WORKERS', 10))
-CREDS_FILE          = os.environ.get('CREDS_FILE', 'admin-analytics-423707-08e7889d4394.json')
+CREDS_FILE          = os.environ.get('CREDS_FILE', 'credentials.json')
 BASE_URL            = 'https://pw.jotform.com/API'
 
 # ---------------- HTTP SESSION ----------------
