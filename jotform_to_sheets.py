@@ -31,12 +31,14 @@ def append_with_retry(sheet, batch, retries=3):
                 raise
 
 
-# ---------------- CONFIG (from environment variables) ----------------
-API_KEY          = os.environ['JOTFORM_API_KEY']
-FORM_ID          = os.environ['JOTFORM_FORM_ID']
-SPREADSHEET_NAME   = os.environ['SPREADSHEET_NAME']          # Google Sheet ID from URL
-WORKSHEET_NAME   = os.environ.get('WORKSHEET_NAME_TDR', 'TDR Updated')
-CREDENTIALS      = os.environ.get('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
+# ---------------- CONFIG ----------------
+# Matching exact secret names from GitHub:
+# API_KEY, FORM_ID, SPREADSHEET_NAME, WORKSHEET_NAME_TDR, GOOGLE_CREDENTIALS_JSON
+
+API_KEY          = os.environ['API_KEY']
+FORM_ID          = os.environ['FORM_ID']
+SPREADSHEET_NAME = os.environ['SPREADSHEET_NAME']
+WORKSHEET_NAME   = os.environ['WORKSHEET_NAME_TDR']
 
 TOTAL_LIMIT         = int(os.environ.get('TOTAL_LIMIT', 8000))
 PAGE_SIZE           = int(os.environ.get('PAGE_SIZE', 200))
@@ -52,25 +54,23 @@ scope = [
     'https://spreadsheets.google.com/feeds',
     'https://www.googleapis.com/auth/drive'
 ]
-creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS, scope)
+creds  = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
 client = gspread.authorize(creds)
 
-# open_by_key avoids SpreadsheetNotFound issues with shared/named sheets
 try:
-    spreadsheet = client.open_by_key(SPREADSHEET_NAME)
-    sheet = spreadsheet.worksheet(WORKSHEET_NAME)
-    print(f"✅ Opened sheet: '{spreadsheet.title}' → worksheet: '{WORKSHEET_NAME}'")
+    sheet = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
+    print(f"✅ Opened: '{SPREADSHEET_NAME}' → '{WORKSHEET_NAME}'")
 except gspread.exceptions.SpreadsheetNotFound:
-    raise Exception(f"❌ Spreadsheet not found for ID: {SPREADSHEET_NAME}. Check SPREADSHEET_NAME secret and service account sharing.")
+    raise Exception(f"❌ SpreadsheetNotFound: '{SPREADSHEET_NAME}' — check secret value and sharing")
 except gspread.exceptions.WorksheetNotFound:
-    raise Exception(f"❌ Worksheet '{WORKSHEET_NAME}' not found. Check WORKSHEET_NAME_TDR secret.")
+    raise Exception(f"❌ WorksheetNotFound: '{WORKSHEET_NAME}' — check WORKSHEET_NAME_TDR secret")
 
 # ---------------- PRESERVE HEADERS ----------------
 existing_headers = sheet.row_values(1)
 if not existing_headers:
     raise Exception("❌ Header row missing in destination sheet")
 
-# ---------------- SAFE CLEAR: values only, no row deletion ----------------
+# ---------------- SAFE CLEAR ----------------
 row_count = sheet.row_count
 col_count = sheet.col_count
 
@@ -78,16 +78,14 @@ if row_count > 1:
     last_col = col_letter(col_count)
     sheet.batch_clear([f"A2:{last_col}{row_count}"])
 
-print("🧹 Old data cleared (values only), header preserved")
+print("🧹 Old data cleared, header preserved")
 
 # ---------------- DISCOVER JOTFORM FIELDS ----------------
 first_batch = jotform.get_form_submissions(FORM_ID, limit=1, offset=0)
 if not first_batch:
     raise Exception("❌ No submissions found for this form")
 
-first_sub    = first_batch[0]
-answers_meta = first_sub.get('answers', {})
-
+answers_meta  = first_batch[0].get('answers', {})
 header_to_qid = {}
 new_headers   = []
 
@@ -122,7 +120,7 @@ while fetched < TOTAL_LIMIT:
         )
 
         if not submissions:
-            print("✔ No more submissions found.")
+            print("✔ No more submissions.")
             break
 
         for sub in submissions:
@@ -167,7 +165,7 @@ while fetched < TOTAL_LIMIT:
         time.sleep(SLEEP_BETWEEN_CALLS)
 
     except IncompleteRead:
-        print("⚠️  IncompleteRead detected, retrying after 5s...")
+        print("⚠️  IncompleteRead, retrying after 5s...")
         time.sleep(5)
         continue
 

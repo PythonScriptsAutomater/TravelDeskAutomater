@@ -7,11 +7,12 @@ from oauth2client.service_account import ServiceAccountCredentials
 from gspread.exceptions import WorksheetNotFound
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
-# ---------------- CONFIG (from environment variables) ----------------
+# ---------------- CONFIG ----------------
+# Matches secrets: API_KEY, FORM_ID, SPREADSHEET_NAME, WORKSHEET_NAME_APPROVAL
 API_KEY          = os.environ['API_KEY']
 FORM_ID          = os.environ['FORM_ID']
-SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', 'Travel desk version 2.0')
-WORKSHEET_NAME   = os.environ.get('WORKSHEET_NAME_APPROVAL', 'Approval status')
+SPREADSHEET_NAME = os.environ['SPREADSHEET_NAME']
+WORKSHEET_NAME   = os.environ['WORKSHEET_NAME_APPROVAL']
 START_DATE       = os.environ.get('START_DATE', '2023-08-01 00:00:00')
 BASE_URL         = 'https://pw.jotform.com/API'
 
@@ -25,24 +26,29 @@ scope = [
     'https://spreadsheets.google.com/feeds',
     'https://www.googleapis.com/auth/drive'
 ]
-
-CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS_JSON', 'credentials.json')
-creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS, scope)
+creds  = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
 client = gspread.authorize(creds)
 
-spreadsheet = client.open(SPREADSHEET_NAME)
+try:
+    spreadsheet = client.open(SPREADSHEET_NAME)
+    print(f"✅ Opened spreadsheet: '{SPREADSHEET_NAME}'")
+except gspread.exceptions.SpreadsheetNotFound:
+    raise Exception(f"❌ SpreadsheetNotFound: '{SPREADSHEET_NAME}' — check secret and sharing")
 
 try:
     sheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    print(f"✅ Opened worksheet: '{WORKSHEET_NAME}'")
 except WorksheetNotFound:
     sheet = spreadsheet.add_worksheet(title=WORKSHEET_NAME, rows=1000, cols=10)
+    print(f"➕ Created worksheet: '{WORKSHEET_NAME}'")
 
 headers = ['Unique ID', 'Submission Date', 'Updated at', 'Approval Status']
 sheet.clear()
 sheet.update([headers], 'A1')
+print("🧹 Sheet cleared, headers written")
 
 # ---------------- HELPERS ----------------
-def fetch_submissions(offset=0, limit=100):
+def fetch_submissions(offset=0, limit=300):
     url = f"{BASE_URL}/form/{FORM_ID}/submissions"
     params = {
         'apiKey': API_KEY,
@@ -59,7 +65,7 @@ def fetch_submissions(offset=0, limit=100):
     data = response.json()
 
     if data.get('responseCode') != 200:
-        raise Exception(f"Jotform API error: {data}")
+        raise Exception(f"❌ Jotform API error: {data}")
 
     return data.get('content', [])
 
@@ -72,7 +78,6 @@ def extract_unique_id(answers):
 
 
 def append_with_retry(sheet, batch, retries=3):
-    """Write a batch of rows to Google Sheets with retry on connection errors."""
     for attempt in range(retries):
         try:
             sheet.append_rows(batch, value_input_option='RAW')
@@ -86,7 +91,7 @@ def append_with_retry(sheet, batch, retries=3):
                 raise
 
 
-# ---------------- FETCH & WRITE (streaming batches) ----------------
+# ---------------- FETCH & WRITE ----------------
 rows_buffer   = []
 total_written = 0
 offset        = 0
@@ -98,14 +103,15 @@ while page < MAX_PAGES:
     submissions = fetch_submissions(offset=offset, limit=PAGE_SIZE)
 
     if not submissions:
+        print("✔ No more submissions.")
         break
 
     for sub in submissions:
         answers         = sub.get('answers', {})
-        approval_status = sub.get('workflowStatus', '')
         unique_id       = extract_unique_id(answers)
-        last_update     = sub.get('updated_at', '')
         created_at      = sub.get('created_at', '')
+        last_update     = sub.get('updated_at', '')
+        approval_status = sub.get('workflowStatus', '')
 
         rows_buffer.append([
             unique_id,
@@ -123,12 +129,12 @@ while page < MAX_PAGES:
 
     offset += PAGE_SIZE
     page   += 1
-    print(f"✔ Pulled {total_written + len(rows_buffer)} rows so far...")
+    print(f"✔ Page {page} done, {total_written + len(rows_buffer)} rows so far...")
     time.sleep(SLEEP_BETWEEN_CALLS)
 
-# ---------------- FLUSH REMAINING ROWS ----------------
+# ---------------- FLUSH REMAINING ----------------
 if rows_buffer:
     append_with_retry(sheet, rows_buffer)
     total_written += len(rows_buffer)
 
-print(f"✅ DONE — Wrote {total_written} rows to '{SPREADSHEET_NAME}' -> '{WORKSHEET_NAME}'")
+print(f"✅ DONE — {total_written} rows written to '{SPREADSHEET_NAME}' → '{WORKSHEET_NAME}'")

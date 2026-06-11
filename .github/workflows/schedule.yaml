@@ -2,37 +2,33 @@ name: JotForm → Google Sheets Sync
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '30 4 * * *'    # 4:30 AM UTC = 10:00 AM IST
 
   workflow_dispatch:
     inputs:
       total_limit:
-        description: 'Max submissions to pull (script 1)'
+        description: 'Max submissions to pull (TDR sync)'
         required: false
         default: '8000'
-      start_date:
-        description: 'Filter start date for approval sync (script 2, format: YYYY-MM-DD HH:MM:SS)'
-        required: false
-        default: '2023-08-01 00:00:00'
 
 jobs:
+
   # ─────────────────────────────────────────────
-  # JOB 1 — Full TDR submission sync
+  # JOB 1 — TDR submission sync
   # ─────────────────────────────────────────────
   sync-tdr:
     name: 'Step 1 · Sync TDR Updated sheet'
     runs-on: ubuntu-latest
 
     env:
-      JOTFORM_API_KEY: ${{ secrets.API_KEY }}
-      JOTFORM_FORM_ID: ${{ secrets.FORM_ID }}
-      SPREADSHEET_NAME: ${{ secrets.SPREADSHEET_NAME }}
-      WORKSHEET_NAME_TDR: ${{ secrets.WORKSHEET_NAME_TDR }}
-      TOTAL_LIMIT: ${{ github.event.inputs.total_limit || '8000' }}
-      PAGE_SIZE: '200'
+      API_KEY:             ${{ secrets.API_KEY }}
+      FORM_ID:             ${{ secrets.FORM_ID }}
+      SPREADSHEET_NAME:    ${{ secrets.SPREADSHEET_NAME }}
+      WORKSHEET_NAME_TDR:  ${{ secrets.WORKSHEET_NAME_TDR }}
+      TOTAL_LIMIT:         ${{ github.event.inputs.total_limit || '8000' }}
+      PAGE_SIZE:           '200'
       SLEEP_BETWEEN_CALLS: '2'
-      WRITE_BATCH_SIZE: '500'
-      GOOGLE_CREDENTIALS_FILE: credentials.json
+      WRITE_BATCH_SIZE:    '500'
 
     steps:
       - name: Checkout repository
@@ -47,13 +43,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write Google credentials from secret
-        env:
-          CREDS: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-        run: echo "$CREDS" > credentials.json
+      - name: Write Google credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
 
-      - name: Run TDR sync script
+      - name: Run TDR sync
         run: python jotform_to_sheets.py
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f credentials.json
 
   # ─────────────────────────────────────────────
   # JOB 2 — Approval status sync (runs AFTER job 1)
@@ -64,16 +62,15 @@ jobs:
     needs: sync-tdr
 
     env:
-      JOTFORM_API_KEY:          ${{ secrets.API_KEY }}
-      JOTFORM_FORM_ID:          ${{ secrets.FORM_ID }}
+      API_KEY:                  ${{ secrets.API_KEY }}
+      FORM_ID:                  ${{ secrets.FORM_ID }}
       SPREADSHEET_NAME:         ${{ secrets.SPREADSHEET_NAME }}
       WORKSHEET_NAME_APPROVAL:  ${{ secrets.WORKSHEET_NAME_APPROVAL }}
-      START_DATE:               ${{ github.event.inputs.start_date || '2023-08-01 00:00:00' }}
+      START_DATE:               '2023-08-01 00:00:00'
       PAGE_SIZE:                '300'
       SLEEP_BETWEEN_CALLS:      '1'
       MAX_PAGES:                '500'
       WRITE_BATCH_SIZE:         '500'
-      GOOGLE_CREDENTIALS_FILE:  credentials.json
 
     steps:
       - name: Checkout repository
@@ -88,10 +85,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write Google credentials from secret
-        env:
-          CREDS: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-        run: echo "$CREDS" > credentials.json
+      - name: Write Google credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
 
-      - name: Run Approval Status sync script
+      - name: Run Approval sync
         run: python approval_status_sync.py
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f credentials.json
