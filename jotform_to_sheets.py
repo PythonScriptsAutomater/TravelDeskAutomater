@@ -22,22 +22,20 @@ SLEEP_BETWEEN_CALLS = int(os.environ.get('SLEEP_BETWEEN_CALLS', 2))
 WRITE_BATCH_SIZE    = int(os.environ.get('WRITE_BATCH_SIZE', 500))
 THREAD_WORKERS      = int(os.environ.get('THREAD_WORKERS', 10))
 CREDS_FILE          = os.environ.get('CREDS_FILE', 'admin-analytics-423707-08e7889d4394.json')
-DEBUG_THREAD        = os.environ.get('DEBUG_THREAD', 'false').lower() == 'true'  # set true to debug missing approval dates
 BASE_URL            = 'https://pw.jotform.com/API'
 
-# ---------------- HTTP SESSION (shared across all threads) ----------------
-# Reuses TCP connections + auto-retries on transient network errors
+# ---------------- HTTP SESSION ----------------
 retry_strategy = Retry(
     total=4,
-    backoff_factor=1,          # waits 1s, 2s, 4s, 8s between retries
+    backoff_factor=1,
     status_forcelist=[429, 500, 502, 503, 504],
     allowed_methods=["GET"],
     raise_on_status=False,
 )
 adapter = HTTPAdapter(
     max_retries=retry_strategy,
-    pool_connections=THREAD_WORKERS,   # one connection pool per worker
-    pool_maxsize=THREAD_WORKERS * 2,   # headroom for bursts
+    pool_connections=THREAD_WORKERS,
+    pool_maxsize=THREAD_WORKERS * 2,
 )
 session = requests.Session()
 session.mount("https://", adapter)
@@ -67,10 +65,9 @@ def append_with_retry(sheet, batch, retries=3):
                 raise
 
 
-def get_last_approval_date(thread_data, debug_sub_id=None):
+def get_last_approval_date(thread_data):
     approval_events = []
-    content = thread_data.get('content', [])
-    for event in content:
+    for event in thread_data.get('content', []):
         action_type = event.get('actionType', '')
         details     = event.get('actionDetails', {})
         is_approval_complete = (
@@ -84,43 +81,26 @@ def get_last_approval_date(thread_data, debug_sub_id=None):
         )
         if is_approval_complete or is_approval_mail_complete:
             approval_events.append(event.get('timestamp', ''))
-
-    # If nothing found but thread has events, dump them so we can see what fields exist
-    if not approval_events and content and debug_sub_id:
-        print(f"  🔍 DEBUG sub {debug_sub_id} — {len(content)} events, no approval match:")
-        for e in content:
-            print(f"      actionType={e.get('actionType')} | title={e.get('actionDetails',{}).get('title')} | reason={e.get('actionDetails',{}).get('reason')} | ts={e.get('timestamp')}")
-
     return approval_events[-1] if approval_events else ''
 
 
 def fetch_thread_safe(sub_id, retries=4):
-    """Fetch thread for one submission using the shared session. Returns (sub_id, approval_date)."""
     url = f"{BASE_URL}/submission/{sub_id}/thread"
     for attempt in range(retries):
         try:
             resp = session.get(url, params={'apiKey': API_KEY}, timeout=(10, 20))
             resp.raise_for_status()
-            data = resp.json()
-            return sub_id, get_last_approval_date(data, debug_sub_id=sub_id if DEBUG_THREAD else None)
+            return sub_id, get_last_approval_date(resp.json())
         except requests.exceptions.Timeout:
-            wait = 3 * (attempt + 1)
-            print(f"⚠️  Timeout for {sub_id} (attempt {attempt+1}/{retries}), retrying in {wait}s...")
-            time.sleep(wait)
+            time.sleep(3 * (attempt + 1))
         except requests.exceptions.HTTPError as e:
-            # 429 = rate limited — back off hard
             if e.response is not None and e.response.status_code == 429:
-                wait = 15 * (attempt + 1)
-                print(f"⚠️  Rate limited (429), backing off {wait}s...")
-                time.sleep(wait)
+                time.sleep(15 * (attempt + 1))
             else:
-                print(f"⚠️  HTTP error for {sub_id}: {e}")
                 break
-        except Exception as e:
-            wait = 3 * (attempt + 1)
-            print(f"⚠️  Thread error for {sub_id} ({type(e).__name__}), retrying in {wait}s...")
-            time.sleep(wait)
-    return sub_id, '__NO_WORKFLOW__'
+        except Exception:
+            time.sleep(3 * (attempt + 1))
+    return sub_id, ''
 
 
 def fetch_threads_batch(sub_ids):
@@ -130,22 +110,21 @@ def fetch_threads_batch(sub_ids):
         for future in as_completed(futures):
             sid, approval_date = future.result()
             results[sid] = approval_date
-
-    # Log how many threads actually returned an approval date vs empty
-    hits   = sum(1 for v in results.values() if v and v != '__NO_WORKFLOW__')
-    no_wf  = sum(1 for v in results.values() if v == '__NO_WORKFLOW__')
-    pending = sum(1 for v in results.values() if not v)
-    print(f"    ✔ Approved: {hits} | Pending/no date: {pending} | No workflow (old subs): {no_wf} | Total: {len(results)}")
-
-    # Strip sentinel before returning
-    results = {k: ('' if v == '__NO_WORKFLOW__' else v) for k, v in results.items()}
-
-    # Only pause if real failures, not just pre-workflow submissions
-    if hits == 0 and no_wf == 0 and pending == len(sub_ids) and len(sub_ids) > 5:
-        print("    🛑 All thread fetches returned empty — possible rate limit, pausing 30s...")
-        time.sleep(30)
-
     return results
+
+
+def get_submissions_with_retry(form_id, limit, offset, retries=5):
+    for attempt in range(retries):
+        try:
+            return jotform.get_form_submissions(form_id, limit=limit, offset=offset)
+        except (IncompleteRead, ConnectionAbortedError, ConnectionResetError, OSError) as e:
+            wait = 5 * (attempt + 1)
+            print(f"⚠️  Submission fetch failed (attempt {attempt + 1}/{retries}), retrying in {wait}s... [{type(e).__name__}]")
+            time.sleep(wait)
+        except Exception as e:
+            print(f"⚠️  Unexpected error fetching submissions: {e}")
+            raise
+    raise Exception(f"❌ Failed to fetch submissions at offset {offset} after {retries} attempts")
 
 
 # ---------------- JOTFORM ----------------
@@ -218,21 +197,6 @@ total_written = 0
 
 print(f"🚀 Fetching submissions (workers={THREAD_WORKERS})...")
 
-def get_submissions_with_retry(form_id, limit, offset, retries=5):
-    """Fetch a page of submissions, retrying on any connection error."""
-    for attempt in range(retries):
-        try:
-            return jotform.get_form_submissions(form_id, limit=limit, offset=offset)
-        except (IncompleteRead, ConnectionAbortedError, ConnectionResetError, OSError) as e:
-            wait = 5 * (attempt + 1)
-            print(f"⚠️  Submission fetch failed (attempt {attempt + 1}/{retries}), retrying in {wait}s... [{type(e).__name__}]")
-            time.sleep(wait)
-        except Exception as e:
-            print(f"⚠️  Unexpected error fetching submissions: {e}")
-            raise
-    raise Exception(f"❌ Failed to fetch submissions at offset {offset} after {retries} attempts")
-
-
 while fetched < TOTAL_LIMIT:
     try:
         submissions = get_submissions_with_retry(FORM_ID, limit=PAGE_SIZE, offset=offset)
@@ -241,9 +205,7 @@ while fetched < TOTAL_LIMIT:
             print("✔ No more submissions.")
             break
 
-        sub_ids = [sub.get('id', '') for sub in submissions]
-        print(f"  ⚡ Fetching {len(sub_ids)} threads concurrently...")
-        approval_dates = fetch_threads_batch(sub_ids)
+        approval_dates = fetch_threads_batch([sub.get('id', '') for sub in submissions])
 
         for sub in submissions:
             sub_id = sub.get('id', '')
@@ -286,7 +248,7 @@ while fetched < TOTAL_LIMIT:
         time.sleep(SLEEP_BETWEEN_CALLS)
 
     except (IncompleteRead, ConnectionAbortedError, ConnectionResetError, OSError) as e:
-        print(f"⚠️  Connection error in main loop: {type(e).__name__}, retrying after 5s...")
+        print(f"⚠️  Connection error: {type(e).__name__}, retrying after 5s...")
         time.sleep(5)
         continue
 
