@@ -53,7 +53,7 @@ scope = [
 ]
 
 # Credentials are written from the GH secret (base64-encoded JSON or raw JSON)
-CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
+CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS_JSON', 'credentials.json')
 creds  = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS, scope)
 client = gspread.authorize(creds)
 sheet  = client.open(SPREADSHEET_NAME).worksheet(WORKSHEET_NAME)
