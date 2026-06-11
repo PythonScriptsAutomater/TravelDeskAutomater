@@ -57,11 +57,11 @@ client = gspread.authorize(creds)
 
 # open_by_key avoids SpreadsheetNotFound issues with shared/named sheets
 try:
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    spreadsheet = client.open_by_key(SPREADSHEET_NAME)
     sheet = spreadsheet.worksheet(WORKSHEET_NAME)
     print(f"✅ Opened sheet: '{spreadsheet.title}' → worksheet: '{WORKSHEET_NAME}'")
 except gspread.exceptions.SpreadsheetNotFound:
-    raise Exception(f"❌ Spreadsheet not found for ID: {SPREADSHEET_ID}. Check SPREADSHEET_ID secret and service account sharing.")
+    raise Exception(f"❌ Spreadsheet not found for ID: {SPREADSHEET_NAME}. Check SPREADSHEET_NAME secret and service account sharing.")
 except gspread.exceptions.WorksheetNotFound:
     raise Exception(f"❌ Worksheet '{WORKSHEET_NAME}' not found. Check WORKSHEET_NAME_TDR secret.")
 
