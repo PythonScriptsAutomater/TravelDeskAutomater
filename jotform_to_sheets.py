@@ -32,8 +32,8 @@ def append_with_retry(sheet, batch, retries=3):
 
 
 # ---------------- CONFIG (from environment variables) ----------------
-API_KEY          = os.environ['JOTFORM_API_KEY']
-FORM_ID          = os.environ['JOTFORM_FORM_ID']
+API_KEY          = os.environ['API_KEY']
+FORM_ID          = os.environ['FORM_ID']
 SPREADSHEET_NAME = os.environ.get('SPREADSHEET_NAME', 'Travel desk version 2.0')
 WORKSHEET_NAME   = os.environ.get('WORKSHEET_NAME_TDR', 'TDR Updated')
 
