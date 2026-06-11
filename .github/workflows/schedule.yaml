@@ -1,6 +1,8 @@
 name: JotForm → Google Sheets Sync
 
 on:
+  schedule:
+    - cron: '0 2 * * *'
 
   workflow_dispatch:
     inputs:
@@ -24,8 +26,8 @@ jobs:
     env:
       JOTFORM_API_KEY:         ${{ secrets.JOTFORM_API_KEY }}
       JOTFORM_FORM_ID:         ${{ secrets.JOTFORM_FORM_ID }}
-      SPREADSHEET_NAME:        ${{ vars.SPREADSHEET_NAME }}
-      WORKSHEET_NAME_TDR:      ${{ vars.WORKSHEET_NAME_TDR }}
+      SPREADSHEET_NAME:        ${{ secrets.SPREADSHEET_NAME }}
+      WORKSHEET_NAME_TDR:      ${{ secrets.WORKSHEET_NAME_TDR }}
       TOTAL_LIMIT:             ${{ github.event.inputs.total_limit || '8000' }}
       PAGE_SIZE:               '200'
       SLEEP_BETWEEN_CALLS:     '2'
@@ -64,8 +66,8 @@ jobs:
     env:
       JOTFORM_API_KEY:          ${{ secrets.JOTFORM_API_KEY }}
       JOTFORM_FORM_ID:          ${{ secrets.JOTFORM_FORM_ID }}
-      SPREADSHEET_NAME:         ${{ vars.SPREADSHEET_NAME }}
-      WORKSHEET_NAME_APPROVAL:  ${{ vars.WORKSHEET_NAME_APPROVAL }}
+      SPREADSHEET_NAME:         ${{ secrets.SPREADSHEET_NAME }}
+      WORKSHEET_NAME_APPROVAL:  ${{ secrets.WORKSHEET_NAME_APPROVAL }}
       START_DATE:               ${{ github.event.inputs.start_date || '2023-08-01 00:00:00' }}
       PAGE_SIZE:                '300'
       SLEEP_BETWEEN_CALLS:      '1'
