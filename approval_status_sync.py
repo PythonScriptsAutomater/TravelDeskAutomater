@@ -14,7 +14,7 @@ API_KEY                 = os.environ['API_KEY']
 FORM_ID                 = os.environ['FORM_ID']
 GOOGLE_CREDENTIALS_JSON = os.environ.get('CREDS_FILE', 'credentials.json')  # raw service-account JSON, not a file path
 SPREADSHEET_NAME        = os.environ['SPREADSHEET_NAME']
-WORKSHEET_NAME          = os.environ['WORKSHEET_NAME_TDR']
+WORKSHEET_NAME   = os.environ['WORKSHEET_NAME_APPROVAL']
 
 JOTFORM_BASE_URL  = "https://pw.jotform.com/API"  # swap to api.jotform.com if non-enterprise
 PAGE_SIZE         = 1000  # JotForm's hard max per request is 1000; loop below pages past that
