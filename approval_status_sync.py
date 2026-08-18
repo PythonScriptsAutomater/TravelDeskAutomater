@@ -12,7 +12,7 @@ from google.oauth2.service_account import Credentials
 
 API_KEY                 = os.environ['API_KEY']
 FORM_ID                 = os.environ['FORM_ID']
-GOOGLE_CREDENTIALS_JSON = os.environ['GOOGLE_CREDENTIALS_JSON']  # raw service-account JSON, not a file path
+GOOGLE_CREDENTIALS_JSON = os.environ.get('CREDS_FILE', 'credentials.json')  # raw service-account JSON, not a file path
 SPREADSHEET_NAME        = os.environ['SPREADSHEET_NAME']
 WORKSHEET_NAME          = os.environ['WORKSHEET_NAME_TDR']
 
