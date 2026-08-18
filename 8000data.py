@@ -1,12 +1,12 @@
 import os
 import time
+import json
 import requests
 import gspread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from oauth2client.service_account import ServiceAccountCredentials
-from jotform import JotformAPIClient
 from http.client import IncompleteRead
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
@@ -56,6 +56,12 @@ def col_letter(n):
         n, rem = divmod(n - 1, 26)
         result = chr(65 + rem) + result
     return result
+
+
+def get_approval_status(sub):
+    """Return Jotform's workflowStatus field exactly as provided by the API.
+    No interpretation/derivation - raw passthrough only."""
+    return sub.get('workflowStatus', '')
 
 
 def append_with_retry(sheet, batch, retries=3):
@@ -147,7 +153,7 @@ def fetch_threads_batch(sub_ids):
     return results
 
 
-def get_submissions_page(form_id, limit, offset, retries=5):
+def get_submissions_page(form_id, limit, offset, retries=5, debug=False):
     """Fetch one page newest-first (DESC) — we want latest N, then reverse."""
     url = f"{BASE_URL}/form/{form_id}/submissions"
     params = {
@@ -161,10 +167,17 @@ def get_submissions_page(form_id, limit, offset, retries=5):
     for attempt in range(retries):
         try:
             resp = session.get(url, params=params, timeout=(10, 30))
+            if debug:
+                print("DEBUG - status code:", resp.status_code)
+                print("DEBUG - response preview:", resp.text[:500])
             resp.raise_for_status()
             data    = resp.json()
             content = data.get('content', data)
-            return content if isinstance(content, list) else []
+            content = content if isinstance(content, list) else []
+            if debug and content:
+                print("DEBUG - keys in first submission:", list(content[0].keys()))
+                print("DEBUG - workflowStatus value:", content[0].get('workflowStatus', '<<MISSING>>'))
+            return content
         except (IncompleteRead, ConnectionAbortedError, ConnectionResetError, OSError) as e:
             wait = 5 * (attempt + 1)
             print(f"⚠️  Fetch failed (attempt {attempt + 1}/{retries}), retrying in {wait}s... [{type(e).__name__}]")
@@ -276,12 +289,7 @@ def sub_to_row(sub, approval_date, headers, header_to_qid, option_lookup):
         'Submission ID':      sub_id,
         'Submission Date':    sub.get('created_at', ''),
         'Last Update Date':   sub.get('updated_at', ''),
-        'Approval Status':    (
-            sub.get('workflowStatus')
-            or sub.get('workflow_status')
-            or sub.get('status')
-            or ''
-        ),
+        'Approval Status':    get_approval_status(sub),
         'Last Approval Date': approval_date,
         UNIQUE_ID_COL:        sub_id,  # fallback; real value comes from answers below if present
     }
@@ -309,10 +317,6 @@ def sub_to_row(sub, approval_date, headers, header_to_qid, option_lookup):
 
     return [row_data.get(h, '') for h in headers]
 
-
-# ---------------- JOTFORM CLIENT ----------------
-jotform = JotformAPIClient(API_KEY)
-jotform.set_baseurl('https://pw.jotform.com/API/')
 
 # ---------------- GOOGLE SHEETS ----------------
 scope = [
@@ -382,8 +386,9 @@ for qid, meta in q_data['content'].items():
 #    Fix: pull one sample submission and merge in any answer fields whose
 #    'text' wasn't already discovered above. Also merge their
 #    options_array into option_lookup so keyed answers (e.g. "{abc123}")
-#    still resolve correctly. ──
-sample_submissions = get_submissions_page(FORM_ID, limit=1, offset=0)
+#    still resolve correctly. Runs with debug=True so we can confirm
+#    workflowStatus is actually coming through from this endpoint. ──
+sample_submissions = get_submissions_page(FORM_ID, limit=1, offset=0, debug=True)
 if sample_submissions:
     sample_answers = sample_submissions[0].get('answers', {})
     extra_meta = {
