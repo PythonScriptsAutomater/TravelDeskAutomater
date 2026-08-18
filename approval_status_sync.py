@@ -9,10 +9,12 @@ import gspread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.oauth2.service_account import Credentials
 
-API_KEY          = os.environ['API_KEY']
-FORM_ID          = os.environ['FORM_ID']
-SPREADSHEET_NAME = os.environ['SPREADSHEET_NAME']
-WORKSHEET_NAME   = os.environ['WORKSHEET_NAME_TDR']
+API_KEY           = os.environ['API_KEY']
+FORM_ID           = os.environ['FORM_ID']
+SPREADSHEET_NAME  = os.environ['SPREADSHEET_NAME']
+WORKSHEET_NAME    = os.environ['WORKSHEET_NAME_TDR']
+GOOGLE_CREDS_FILE = os.environ.get('GOOGLE_CREDS_FILE', 'credentials.json')
+
 JOTFORM_BASE_URL  = "https://pw.jotform.com/API"  # swap to api.jotform.com if non-enterprise
 PAGE_SIZE         = 1000  # JotForm's hard max per request is 1000; loop below pages past that
 THREAD_PAGE_SIZE  = 1000
@@ -31,14 +33,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
-# These are read from environment variables so the same code works locally
-# and as a Cloud Function (set them as env vars / secrets in the deploy step).
-JOTFORM_API_KEY   = os.environ.get("JOTFORM_API_KEY", "YOUR_JOTFORM_API_KEY")
-JOTFORM_FORM_ID   = os.environ.get("JOTFORM_FORM_ID", "YOUR_FORM_ID")
-GOOGLE_SHEET_ID   = os.environ.get("GOOGLE_SHEET_ID", "YOUR_GOOGLE_SHEET_ID")
-GOOGLE_CREDS_FILE = os.environ.get("GOOGLE_CREDS_FILE", "service_account.json")
-SHEET_NAME        = "Sheet3"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,7 +70,7 @@ def jf_get(endpoint: str, params: dict = None) -> dict:
       a transient issue.
     """
     url = f"{JOTFORM_BASE_URL}{endpoint}"
-    p = {"apikey": JOTFORM_API_KEY}
+    p = {"apikey": API_KEY}
     p.update(params or {})
 
     last_exc = None
@@ -165,10 +159,6 @@ def fetch_thread(submission_id: str) -> list[dict]:
 
 
 # ─── Parsing ─────────────────────────────────────────────────────────────────
-# (unchanged - get_answer, parse_unique_id, latest_workflow_instance_id,
-#  filter_to_latest_instance, discover_approval_steps, _initial_recipients,
-#  DECISION_ACTION_TYPES, parse_one_step, compute_walk_status, build_row
-#  all stay exactly as you had them)
 
 def get_answer(answers: dict, field_name: str) -> str:
     for v in answers.values():
@@ -377,16 +367,15 @@ def process_all_submissions(submissions: list[dict]) -> list[list]:
 
 
 # ─── Google Sheets helpers ────────────────────────────────────────────────────
-# (unchanged from your version)
 
-def get_or_create_sheet(client: gspread.Client, spreadsheet_id: str) -> gspread.Worksheet:
-    ss = client.open_by_key(spreadsheet_id)
+def get_or_create_sheet(client: gspread.Client, spreadsheet_name: str) -> gspread.Worksheet:
+    ss = client.open(spreadsheet_name)
     try:
-        ws = ss.worksheet(SHEET_NAME)
-        log.info("Found existing sheet: '%s'", SHEET_NAME)
+        ws = ss.worksheet(WORKSHEET_NAME)
+        log.info("Found existing sheet: '%s'", WORKSHEET_NAME)
     except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=SHEET_NAME, rows=5000, cols=len(HEADERS) + 2)
-        log.info("Created new sheet: '%s'", SHEET_NAME)
+        ws = ss.add_worksheet(title=WORKSHEET_NAME, rows=5000, cols=len(HEADERS) + 2)
+        log.info("Created new sheet: '%s'", WORKSHEET_NAME)
     return ws
 
 
@@ -485,19 +474,16 @@ def write_all_rows(ws: gspread.Worksheet, rows: list[list]):
 # ─── Core sync (shared by CLI + Cloud Function entry points) ─────────────────
 
 def run_sync() -> dict:
-    if JOTFORM_API_KEY == "YOUR_JOTFORM_API_KEY":
-        raise RuntimeError("Set JOTFORM_API_KEY env var.")
-    if JOTFORM_FORM_ID == "YOUR_FORM_ID":
-        raise RuntimeError("Set JOTFORM_FORM_ID env var.")
-    if GOOGLE_SHEET_ID == "YOUR_GOOGLE_SHEET_ID":
-        raise RuntimeError("Set GOOGLE_SHEET_ID env var.")
+    # API_KEY / FORM_ID / SPREADSHEET_NAME / WORKSHEET_NAME already raise a
+    # clear KeyError at import time (via os.environ[...]) if unset, so no
+    # placeholder-value checks are needed for them here.
     if not os.path.exists(GOOGLE_CREDS_FILE):
         raise RuntimeError(f"Creds file not found: {GOOGLE_CREDS_FILE}")
 
     log.info("Connecting to Google Sheets ...")
     creds = Credentials.from_service_account_file(GOOGLE_CREDS_FILE, scopes=SCOPES)
     client = gspread.authorize(creds)
-    ws = get_or_create_sheet(client, GOOGLE_SHEET_ID)
+    ws = get_or_create_sheet(client, SPREADSHEET_NAME)
 
     is_new = ws.row_values(1) != HEADERS
     setup_headers(ws)
@@ -506,14 +492,14 @@ def run_sync() -> dict:
 
     clear_sheet_body(ws)
 
-    submissions = fetch_all_submissions(JOTFORM_FORM_ID)
+    submissions = fetch_all_submissions(FORM_ID)
     log.info("Fetching threads for %d submissions with %d workers ...", len(submissions), MAX_WORKERS)
     all_rows = process_all_submissions(submissions)
 
     log.info("Writing %d rows ...", len(all_rows))
     write_all_rows(ws, all_rows)
 
-    log.info("Done! Sheet: https://docs.google.com/spreadsheets/d/%s", GOOGLE_SHEET_ID)
+    log.info("Done! Sheet: %s", SPREADSHEET_NAME)
     return {"status": "ok", "rows_written": len(all_rows)}
 
 
