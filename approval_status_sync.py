@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 import time
 import random
 import logging
@@ -10,12 +9,12 @@ import gspread
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from google.oauth2.service_account import Credentials
 
-API_KEY                 = os.environ['API_KEY']
-FORM_ID                 = os.environ['FORM_ID']
-GOOGLE_CREDENTIALS_JSON = os.environ.get('CREDS_FILE', 'credentials.json')  # raw service-account JSON, not a file path
-SPREADSHEET_NAME        = os.environ['SPREADSHEET_NAME']
-WORKSHEET_NAME   = os.environ['WORKSHEET_NAME_APPROVAL']
-CREDS_FILE          = os.environ.get('CREDS_FILE', 'credentials.json')
+API_KEY           = os.environ['API_KEY']
+FORM_ID           = os.environ['FORM_ID']
+SPREADSHEET_NAME  = os.environ['SPREADSHEET_NAME']
+WORKSHEET_NAME    = os.environ['WORKSHEET_NAME_APPROVAL']
+GOOGLE_CREDS_FILE = os.environ.get('GOOGLE_CREDS_FILE', 'credentials.json')  # written to disk by the workflow step
+
 JOTFORM_BASE_URL  = "https://pw.jotform.com/API"  # swap to api.jotform.com if non-enterprise
 PAGE_SIZE         = 1000  # JotForm's hard max per request is 1000; loop below pages past that
 THREAD_PAGE_SIZE  = 1000
@@ -475,16 +474,17 @@ def write_all_rows(ws: gspread.Worksheet, rows: list[list]):
 # ─── Core sync (shared by CLI + Cloud Function entry points) ─────────────────
 
 def run_sync() -> dict:
-    # API_KEY / FORM_ID / GOOGLE_CREDENTIALS_JSON / SPREADSHEET_NAME /
-    # WORKSHEET_NAME already raise a clear KeyError at import time (via
-    # os.environ[...]) if unset, so no placeholder-value checks are needed
-    # for them here.
+    # API_KEY / FORM_ID / SPREADSHEET_NAME / WORKSHEET_NAME already raise a
+    # clear KeyError at import time (via os.environ[...]) if unset, so no
+    # placeholder-value checks are needed for them here.
+    # GOOGLE_CREDS_FILE is written to disk by the workflow's
+    # "Write Google credentials" step (from the GOOGLE_CREDENTIALS_JSON
+    # secret), so it's read from the filesystem rather than an env var.
+    if not os.path.exists(GOOGLE_CREDS_FILE):
+        raise RuntimeError(f"Creds file not found: {GOOGLE_CREDS_FILE}")
+
     log.info("Connecting to Google Sheets ...")
-    try:
-        creds_info = json.loads(GOOGLE_CREDENTIALS_JSON)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"GOOGLE_CREDENTIALS_JSON is not valid JSON: {exc}")
-    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+    creds = Credentials.from_service_account_file(GOOGLE_CREDS_FILE, scopes=SCOPES)
     client = gspread.authorize(creds)
     ws = get_or_create_sheet(client, SPREADSHEET_NAME)
 
