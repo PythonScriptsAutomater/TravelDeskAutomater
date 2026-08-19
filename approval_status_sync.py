@@ -7,6 +7,7 @@ import threading
 import requests
 import gspread
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from google.oauth2.service_account import Credentials
 
 API_KEY           = os.environ['API_KEY']
@@ -19,8 +20,14 @@ JOTFORM_BASE_URL  = "https://pw.jotform.com/API"  # swap to api.jotform.com if n
 PAGE_SIZE         = 1000  # JotForm's hard max per request is 1000; loop below pages past that
 THREAD_PAGE_SIZE  = 1000
 REQUEST_DELAY     = 0.15
-MAX_WORKERS       = 12    # concurrent submission-thread fetches; lower this if you hit 429s
+MAX_WORKERS       = int(os.environ.get('MAX_WORKERS', 20))   # concurrent thread fetches; raise cautiously, lower on 429s
 HEADERS = ["Unique ID", "Submission Date", "Status", "Approval Status", "Date"]
+
+# Statuses that will never change again -> safe to skip refetching their thread.
+# Expired and Failed submissions can be restarted/resubmitted in JotForm, so
+# they are NOT treated as terminal - they get refetched every run until they
+# land on Approved or Rejected.
+TERMINAL_STATUSES = {"Approved", "Rejected"}
 
 # ─── Retry / resilience config ────────────────────────────────────────────────
 MAX_RETRIES        = 4      # per HTTP request, inside jf_get
@@ -28,6 +35,11 @@ BASE_BACKOFF       = 1.0    # seconds, doubles each retry (plus jitter)
 MAX_BACKOFF        = 20.0
 SUBMISSION_RETRIES = 2      # extra whole-submission retries in process_submission
 RATE_LIMIT_PERMITS = MAX_WORKERS  # concurrent in-flight requests across all threads
+
+# ─── Sheets write tuning ───────────────────────────────────────────────────────
+SHEET_WRITE_CHUNK  = int(os.environ.get('SHEET_WRITE_CHUNK', 2000))  # rows per append_rows call
+SHEET_MAX_RETRIES  = 5
+SHEET_BASE_BACKOFF = 2.0
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -47,14 +59,14 @@ _rate_limit_sem = threading.Semaphore(RATE_LIMIT_PERMITS)
 
 # ─── JotForm API ─────────────────────────────────────────────────────────────
 
-def _sleep_backoff(attempt: int, retry_after: str = None):
+def _sleep_backoff(attempt: int, retry_after: str = None, base: float = BASE_BACKOFF, cap: float = MAX_BACKOFF):
     if retry_after:
         try:
             time.sleep(float(retry_after))
             return
         except ValueError:
             pass
-    delay = min(BASE_BACKOFF * (2 ** attempt), MAX_BACKOFF)
+    delay = min(base * (2 ** attempt), cap)
     delay += random.uniform(0, delay * 0.25)  # jitter
     time.sleep(delay)
 
@@ -342,7 +354,12 @@ def process_submission(sub: dict) -> list:
     raise last_exc
 
 
-def process_all_submissions(submissions: list[dict]) -> list[list]:
+def process_all_submissions(submissions: list[dict]) -> tuple[list[list], list[list]]:
+    """
+    Returns (fresh_rows, carried_rows_placeholder). Only submissions passed in
+    are actually fetched/processed - callers are expected to have already
+    filtered out submissions whose prior status is terminal (see run_sync).
+    """
     all_rows = []
     failed = []
     total = len(submissions)
@@ -357,34 +374,56 @@ def process_all_submissions(submissions: list[dict]) -> list[list]:
             except Exception as exc:
                 failed.append(sub.get("id", ""))
                 log.warning("  Skipped %s: %s", sub.get("id", ""), exc)
-            if done % 25 == 0 or done == total:
+            if done % 100 == 0 or done == total:
                 log.info("Processed %d/%d submissions ...", done, total)
 
     if failed:
         log.warning("Finished with %d/%d submissions permanently failed: %s",
-                     len(failed), total, failed)
+                     len(failed), total, failed[:50])
     return all_rows
 
 
 # ─── Google Sheets helpers ────────────────────────────────────────────────────
 
+def _sheets_call_with_retry(fn, *args, **kwargs):
+    """
+    gspread/Sheets API calls hit their own 429s (default quota is 60
+    write requests/min/user) independent of the JotForm side. Wrap every
+    write in the same style of retry we use for jf_get.
+    """
+    last_exc = None
+    for attempt in range(SHEET_MAX_RETRIES + 1):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as exc:
+            status = getattr(exc.response, "status_code", None)
+            last_exc = exc
+            if status in (429, 500, 502, 503) and attempt < SHEET_MAX_RETRIES:
+                log.warning("  Sheets API error (status=%s, attempt %d/%d) — backing off",
+                            status, attempt + 1, SHEET_MAX_RETRIES + 1)
+                _sleep_backoff(attempt, base=SHEET_BASE_BACKOFF, cap=60.0)
+                continue
+            raise
+    raise last_exc
+
+
 def get_or_create_sheet(client: gspread.Client, spreadsheet_name: str) -> gspread.Worksheet:
-    ss = client.open(spreadsheet_name)
+    ss = _sheets_call_with_retry(client.open, spreadsheet_name)
     try:
-        ws = ss.worksheet(WORKSHEET_NAME)
+        ws = _sheets_call_with_retry(ss.worksheet, WORKSHEET_NAME)
         log.info("Found existing sheet: '%s'", WORKSHEET_NAME)
     except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=WORKSHEET_NAME, rows=5000, cols=len(HEADERS) + 2)
+        ws = _sheets_call_with_retry(ss.add_worksheet, title=WORKSHEET_NAME, rows=5000, cols=len(HEADERS) + 2)
         log.info("Created new sheet: '%s'", WORKSHEET_NAME)
     return ws
 
 
 def setup_headers(ws: gspread.Worksheet):
-    if ws.row_values(1) == HEADERS:
+    if _sheets_call_with_retry(ws.row_values, 1) == HEADERS:
         return
-    ws.update("A1", [HEADERS])
+    _sheets_call_with_retry(ws.update, "A1", [HEADERS])
     sheet_id = ws.id
-    ws.spreadsheet.batch_update({"requests": [
+    _sheets_call_with_retry(ws.spreadsheet.batch_update, {"requests": [
         {
             "repeatCell": {
                 "range": {
@@ -452,34 +491,60 @@ def setup_conditional_formatting(ws: gspread.Worksheet):
             }
         })
 
-    ws.spreadsheet.batch_update({"requests": rules})
+    _sheets_call_with_retry(ws.spreadsheet.batch_update, {"requests": rules})
     log.info("Conditional formatting applied.")
+
+
+def read_existing_rows(ws: gspread.Worksheet) -> dict[str, list]:
+    """
+    Load whatever is currently in the sheet, keyed by Unique ID, so we can
+    skip refetching submissions that are already in a terminal state and
+    only ask JotForm about ones that are new or still Pending.
+    """
+    values = _sheets_call_with_retry(ws.get_all_values)
+    if not values or values[0] != HEADERS:
+        return {}
+    existing = {}
+    for row in values[1:]:
+        if not row or not row[0]:
+            continue
+        # pad in case a row is short
+        row = row + [""] * (len(HEADERS) - len(row))
+        existing[row[0]] = row[:len(HEADERS)]
+    log.info("Loaded %d existing rows from sheet for incremental diff.", len(existing))
+    return existing
+
+
+def write_all_rows_chunked(ws: gspread.Worksheet, rows: list[list]):
+    """
+    Writes in bounded chunks instead of one massive append_rows call, so:
+    - we don't risk hitting request size limits at 30k+ rows
+    - a failure partway through doesn't lose everything already written
+    - each chunk gets its own retry via _sheets_call_with_retry
+    """
+    if not rows:
+        log.info("No rows to write.")
+        return
+    total = len(rows)
+    written = 0
+    for i in range(0, total, SHEET_WRITE_CHUNK):
+        chunk = rows[i:i + SHEET_WRITE_CHUNK]
+        _sheets_call_with_retry(ws.append_rows, chunk, value_input_option="USER_ENTERED")
+        written += len(chunk)
+        log.info("Wrote rows %d-%d of %d ...", i + 1, written, total)
+    log.info("Wrote %d rows total.", written)
 
 
 def clear_sheet_body(ws: gspread.Worksheet):
     total_rows = ws.row_count
     if total_rows > 1:
-        ws.batch_clear([f"A2:{gspread.utils.rowcol_to_a1(total_rows, len(HEADERS))}"])
+        _sheets_call_with_retry(ws.batch_clear, [f"A2:{gspread.utils.rowcol_to_a1(total_rows, len(HEADERS))}"])
     log.info("Cleared existing data rows (kept header).")
 
 
-def write_all_rows(ws: gspread.Worksheet, rows: list[list]):
-    if not rows:
-        log.info("No rows to write.")
-        return
-    ws.append_rows(rows, value_input_option="USER_ENTERED")
-    log.info("Wrote %d fresh rows.", len(rows))
-
-
-# ─── Core sync (shared by CLI + Cloud Function entry points) ─────────────────
+# ─── Core sync (shared by CLI + Cloud Function/Run entry points) ─────────────
 
 def run_sync() -> dict:
-    # API_KEY / FORM_ID / SPREADSHEET_NAME / WORKSHEET_NAME already raise a
-    # clear KeyError at import time (via os.environ[...]) if unset, so no
-    # placeholder-value checks are needed for them here.
-    # GOOGLE_CREDS_FILE is written to disk by the workflow's
-    # "Write Google credentials" step (from the GOOGLE_CREDENTIALS_JSON
-    # secret), so it's read from the filesystem rather than an env var.
     if not os.path.exists(GOOGLE_CREDS_FILE):
         raise RuntimeError(f"Creds file not found: {GOOGLE_CREDS_FILE}")
 
@@ -488,25 +553,63 @@ def run_sync() -> dict:
     client = gspread.authorize(creds)
     ws = get_or_create_sheet(client, SPREADSHEET_NAME)
 
-    is_new = ws.row_values(1) != HEADERS
+    is_new = _sheets_call_with_retry(ws.row_values, 1) != HEADERS
     setup_headers(ws)
     if is_new:
         setup_conditional_formatting(ws)
 
-    clear_sheet_body(ws)
+    # ── Incremental diff: only fetch threads for submissions that are new, or
+    # were last seen as Pending/Expired/Failed (any of which can still change -
+    # a workflow can be restarted after expiry/failure). Anything already
+    # Approved/Rejected is copied straight over without hitting JotForm.
+    existing = read_existing_rows(ws)
 
     submissions = fetch_all_submissions(FORM_ID)
-    log.info("Fetching threads for %d submissions with %d workers ...", len(submissions), MAX_WORKERS)
-    all_rows = process_all_submissions(submissions)
+    to_fetch = []
+    carried_rows = {}
+    for sub in submissions:
+        uid = parse_unique_id(sub)
+        prior = existing.get(uid)
+        if prior and prior[3] in TERMINAL_STATUSES:
+            carried_rows[uid] = prior
+        else:
+            to_fetch.append(sub)
 
+    log.info("Submissions: %d total, %d carried over (Approved/Rejected), %d to fetch fresh.",
+              len(submissions), len(carried_rows), len(to_fetch))
+
+    fresh_rows = process_all_submissions(to_fetch) if to_fetch else []
+    for row in fresh_rows:
+        carried_rows[row[0]] = row
+
+    # Preserve original submission order for readability.
+    ordered_ids = [parse_unique_id(s) for s in submissions]
+    all_rows = [carried_rows[uid] for uid in ordered_ids if uid in carried_rows]
+
+    clear_sheet_body(ws)
     log.info("Writing %d rows ...", len(all_rows))
-    write_all_rows(ws, all_rows)
+    write_all_rows_chunked(ws, all_rows)
 
     log.info("Done! Sheet: %s", SPREADSHEET_NAME)
-    return {"status": "ok", "rows_written": len(all_rows)}
+    return {
+        "status": "ok",
+        "rows_written": len(all_rows),
+        "fetched_fresh": len(to_fetch),
+        "carried_over": len(carried_rows) - len(fresh_rows),
+    }
 
 
 def sync_http(request):
+    """
+    HTTP entry point. NOTE: if this is deployed as a request/response Cloud
+    Function, the platform's request timeout still applies (Gen1 max 9 min,
+    Gen2/Cloud Run max ~60 min) - at 30k+ submissions and growing, prefer
+    deploying this as a Cloud Run Job (or Gen2 function with an extended
+    timeout) triggered by Cloud Scheduler, rather than a synchronous
+    request/response function. That removes the "server stops responding
+    mid-run" failure mode entirely, since there's no client waiting on an
+    HTTP connection.
+    """
     try:
         result = run_sync()
         return (result, 200)
