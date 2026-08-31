@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import time
 import random
 import logging
@@ -16,11 +17,16 @@ SPREADSHEET_NAME  = os.environ['SPREADSHEET_NAME']
 WORKSHEET_NAME    = os.environ['WORKSHEET_NAME_APPROVAL']
 GOOGLE_CREDS_FILE = os.environ.get('GOOGLE_CREDS_FILE', 'credentials.json')  # written to disk by the workflow step
 
+# Optional cutoff: only fetch submissions created on/before this date.
+# Format: "YYYY-MM-DD" (e.g. "2026-08-31"), matching JotForm's created_at
+# format. Leave unset / empty to fetch all submissions with no upper bound.
+FETCH_UNTIL_DATE = os.environ.get('FETCH_UNTIL_DATE', '2026-01-01').strip()
+
 JOTFORM_BASE_URL  = "https://pw.jotform.com/API"  # swap to api.jotform.com if non-enterprise
 PAGE_SIZE         = 1000  # JotForm's hard max per request is 1000; loop below pages past that
 THREAD_PAGE_SIZE  = 1000
 REQUEST_DELAY     = 0.15
-MAX_WORKERS       = int(os.environ.get('MAX_WORKERS', 20))   # concurrent thread fetches; raise cautiously, lower on 429s
+MAX_WORKERS       = int(os.environ.get('MAX_WORKERS', 10))   # concurrent thread fetches; raise cautiously, lower on 429s
 HEADERS = ["Unique ID", "Submission Date", "Status", "Approval Status", "Date"]
 
 # Statuses that will never change again -> safe to skip refetching their thread.
@@ -34,7 +40,14 @@ MAX_RETRIES        = 4      # per HTTP request, inside jf_get
 BASE_BACKOFF       = 1.0    # seconds, doubles each retry (plus jitter)
 MAX_BACKOFF        = 20.0
 SUBMISSION_RETRIES = 2      # extra whole-submission retries in process_submission
-RATE_LIMIT_PERMITS = MAX_WORKERS  # concurrent in-flight requests across all threads
+
+# Global cap on concurrent in-flight JotForm requests, decoupled from
+# MAX_WORKERS. At 30k+ submissions, thread fetches dominate total request
+# volume, so this is the real throttle against JotForm's rate limits -
+# independent of how many worker threads are running. Tune this down first
+# if you see repeated 429s in the logs; raising MAX_WORKERS alone will not
+# increase real throughput once this cap is hit.
+RATE_LIMIT_PERMITS = int(os.environ.get('RATE_LIMIT_PERMITS', 15))
 
 # ─── Sheets write tuning ───────────────────────────────────────────────────────
 SHEET_WRITE_CHUNK  = int(os.environ.get('SHEET_WRITE_CHUNK', 2000))  # rows per append_rows call
@@ -129,31 +142,54 @@ def jf_get(endpoint: str, params: dict = None) -> dict:
 
 
 def fetch_all_submissions(form_id: str) -> list[dict]:
+    """
+    Pages through /form/{id}/submissions.
+
+    IMPORTANT: JotForm's resultSet.count is the size of the CURRENT page,
+    not a grand total across the whole query. Using it as a stopping
+    condition ("offset >= total") makes the loop exit after exactly one
+    page, silently truncating results at PAGE_SIZE (e.g. always stopping
+    at 1000 rows regardless of how many submissions actually exist).
+    Instead, keep paging until a page comes back shorter than PAGE_SIZE
+    (or empty), which is the reliable end-of-results signal.
+    """
+    params = {
+        "limit": PAGE_SIZE,
+        "offset": 0,
+        "orderby": "created_at",
+        "direction": "ASC",
+        "addWorkflowStatus": 1,
+    }
+    if FETCH_UNTIL_DATE:
+        # JotForm's filter param takes a JSON object; "lt"/"lte" on
+        # created_at bounds the query server-side rather than fetching
+        # everything and filtering client-side.
+        params["filter"] = json.dumps({"created_at:lte": FETCH_UNTIL_DATE})
+        log.info("Fetching submissions created on/before %s only.", FETCH_UNTIL_DATE)
+
     submissions, offset = [], 0
     while True:
         log.info("Fetching submissions offset=%d ...", offset)
+        params["offset"] = offset
         data = jf_get(
             f"/form/{form_id}/submissions",
-            params={
-                "limit": PAGE_SIZE,
-                "offset": offset,
-                "orderby": "created_at",
-                "direction": "ASC",
-                "addWorkflowStatus": 1,
-            },
+            params=params,
         )
         batch = data.get("content", [])
         submissions.extend(batch)
-        total = data["resultSet"]["count"]
         offset += len(batch)
-        if offset >= total or not batch:
+        if len(batch) < PAGE_SIZE or not batch:
             break
     log.info("Total submissions: %d", len(submissions))
     return submissions
 
 
 def fetch_thread(submission_id: str) -> list[dict]:
-    """The thread endpoint is paginated - page through it fully."""
+    """
+    The thread endpoint is paginated too - same stopping-condition fix as
+    fetch_all_submissions applies here: stop on a short/empty page, not by
+    comparing offset against resultSet.count.
+    """
     events, offset = [], 0
     while True:
         data = jf_get(
@@ -162,10 +198,8 @@ def fetch_thread(submission_id: str) -> list[dict]:
         )
         batch = data.get("content", [])
         events.extend(batch)
-        result_set = data.get("resultSet", {})
-        total = result_set.get("count", len(batch))
         offset += len(batch)
-        if offset >= total or not batch:
+        if len(batch) < THREAD_PAGE_SIZE or not batch:
             break
     return events
 
@@ -354,11 +388,11 @@ def process_submission(sub: dict) -> list:
     raise last_exc
 
 
-def process_all_submissions(submissions: list[dict]) -> tuple[list[list], list[list]]:
+def process_all_submissions(submissions: list[dict]) -> list[list]:
     """
-    Returns (fresh_rows, carried_rows_placeholder). Only submissions passed in
-    are actually fetched/processed - callers are expected to have already
-    filtered out submissions whose prior status is terminal (see run_sync).
+    Returns fresh_rows. Only submissions passed in are actually
+    fetched/processed - callers are expected to have already filtered out
+    submissions whose prior status is terminal (see run_sync).
     """
     all_rows = []
     failed = []
@@ -380,6 +414,9 @@ def process_all_submissions(submissions: list[dict]) -> tuple[list[list], list[l
     if failed:
         log.warning("Finished with %d/%d submissions permanently failed: %s",
                      len(failed), total, failed[:50])
+        if len(failed) > 50:
+            log.warning("  (%d additional failed IDs omitted from log; %d total)",
+                         len(failed) - 50, len(failed))
     return all_rows
 
 
@@ -500,9 +537,23 @@ def read_existing_rows(ws: gspread.Worksheet) -> dict[str, list]:
     Load whatever is currently in the sheet, keyed by Unique ID, so we can
     skip refetching submissions that are already in a terminal state and
     only ask JotForm about ones that are new or still Pending.
+
+    If the header row doesn't match HEADERS exactly (e.g. HEADERS was
+    edited/reordered after the sheet was created), we can't trust the
+    columns, so we treat the sheet as empty and do a full refetch. That is
+    correct behavior, but at 30k+ submissions it's an expensive silent
+    fallback - so it's logged loudly instead of returning quietly.
     """
     values = _sheets_call_with_retry(ws.get_all_values)
-    if not values or values[0] != HEADERS:
+    if not values:
+        return {}
+    if values[0] != HEADERS:
+        log.warning(
+            "Sheet header row does not match expected HEADERS (got %r, expected %r). "
+            "Treating sheet as empty and doing a FULL refetch of all submissions - "
+            "this will be slow and hit JotForm hard at your submission volume.",
+            values[0], HEADERS,
+        )
         return {}
     existing = {}
     for row in values[1:]:
@@ -603,12 +654,11 @@ def sync_http(request):
     """
     HTTP entry point. NOTE: if this is deployed as a request/response Cloud
     Function, the platform's request timeout still applies (Gen1 max 9 min,
-    Gen2/Cloud Run max ~60 min) - at 30k+ submissions and growing, prefer
-    deploying this as a Cloud Run Job (or Gen2 function with an extended
-    timeout) triggered by Cloud Scheduler, rather than a synchronous
-    request/response function. That removes the "server stops responding
-    mid-run" failure mode entirely, since there's no client waiting on an
-    HTTP connection.
+    Gen2/Cloud Run max ~60 min) - at 30k+ submissions, prefer deploying this
+    as a Cloud Run Job (or Gen2 function with an extended timeout) triggered
+    by Cloud Scheduler, rather than a synchronous request/response function.
+    That removes the "server stops responding mid-run" failure mode
+    entirely, since there's no client waiting on an HTTP connection.
     """
     try:
         result = run_sync()
