@@ -19,8 +19,8 @@ GOOGLE_CREDS_FILE = os.environ.get('GOOGLE_CREDS_FILE', 'credentials.json')  # w
 
 # Optional cutoff: only fetch submissions created on/before this date.
 # Format: "YYYY-MM-DD" (e.g. "2026-08-31"), matching JotForm's created_at
-# format. Leave unset / empty to fetch all submissions with no upper bound.
-FETCH_UNTIL_DATE = os.environ.get('FETCH_UNTIL_DATE', '2026-01-01').strip()
+# format. Leave unset / empty to fetch all submissions with no lower  bound.
+FETCH_FROM_DATE = os.environ.get('FETCH_FROM_DATE', '2026-01-01').strip()
 
 JOTFORM_BASE_URL  = "https://pw.jotform.com/API"  # swap to api.jotform.com if non-enterprise
 PAGE_SIZE         = 1000  # JotForm's hard max per request is 1000; loop below pages past that
@@ -29,10 +29,9 @@ REQUEST_DELAY     = 0.15
 MAX_WORKERS       = int(os.environ.get('MAX_WORKERS', 10))   # concurrent thread fetches; raise cautiously, lower on 429s
 HEADERS = ["Unique ID", "Submission Date", "Status", "Approval Status", "Date"]
 
-# Statuses that will never change again -> safe to skip refetching their thread.
-# Expired and Failed submissions can be restarted/resubmitted in JotForm, so
-# they are NOT treated as terminal - they get refetched every run until they
-# land on Approved or Rejected.
+# Optional cutoff: only fetch submissions created on/before this date.
+# Format: "YYYY-MM-DD" (e.g. "2026-08-31"), matching JotForm's created_at
+# format. Leave unset / empty to fetch all submissions with no upper bound.
 TERMINAL_STATUSES = {"Approved", "Rejected"}
 
 # ─── Retry / resilience config ────────────────────────────────────────────────
@@ -160,12 +159,12 @@ def fetch_all_submissions(form_id: str) -> list[dict]:
         "direction": "ASC",
         "addWorkflowStatus": 1,
     }
-    if FETCH_UNTIL_DATE:
-        # JotForm's filter param takes a JSON object; "lt"/"lte" on
-        # created_at bounds the query server-side rather than fetching
-        # everything and filtering client-side.
-        params["filter"] = json.dumps({"created_at:lte": FETCH_UNTIL_DATE})
-        log.info("Fetching submissions created on/before %s only.", FETCH_UNTIL_DATE)
+    if FETCH_FROM_DATE:
+        # JotForm's filter param takes a JSON object; "gte" on created_at
+        # bounds the query server-side to submissions on/after this date,
+        # rather than fetching everything and filtering client-side.
+        params["filter"] = json.dumps({"created_at:gte": FETCH_FROM_DATE})
+        log.info("Fetching submissions created on/after %s only.", FETCH_FROM_DATE)
 
     submissions, offset = [], 0
     while True:
